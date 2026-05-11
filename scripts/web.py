@@ -1078,18 +1078,42 @@ HTML = """<!doctype html>
 
     function quotaState(account) {
       const lookup = limitsMap(account);
-      const weekly = lookup.Weekly || emptyLimit("Weekly");
-      if (limitPercent(weekly) <= 0) {
-        return { label: "周额度耗尽", className: "warn", available: false };
+      const weekly = lookup.Weekly;
+      if (weekly && limitPercent(weekly) <= 0) {
+        return { label: "周额度耗尽", className: "warn", quotaAvailable: false };
       }
       if (!supportsFiveHourLimit(account)) {
-        return { label: "有额度", className: "member", available: true };
+        return weekly
+          ? { label: "有额度", className: "member", quotaAvailable: true }
+          : { label: "额度未知", className: "", quotaAvailable: null };
       }
-      const fiveHour = lookup["5h"] || emptyLimit("5h");
-      if (limitPercent(fiveHour) <= 0) {
-        return { label: "待5h重置", className: "wait", available: false };
+      const fiveHour = lookup["5h"];
+      if (fiveHour && limitPercent(fiveHour) <= 0) {
+        return { label: "待5h重置", className: "wait", quotaAvailable: false };
       }
-      return { label: "有额度", className: "member", available: true };
+      if (weekly || fiveHour) {
+        return { label: "有额度", className: "member", quotaAvailable: true };
+      }
+      return { label: "额度未知", className: "", quotaAvailable: null };
+    }
+
+    function authState(account) {
+      const issue = String((account && account.auth_issue) || (account && account.token_keepalive_error) || "");
+      const available = Boolean(account) && account.auth_available !== false && !issue;
+      return {
+        available,
+        label: available ? "认证正常" : "认证异常",
+        className: available ? "member" : "warn",
+        issue
+      };
+    }
+
+    function escapeAttr(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
     }
 
     function formatLimitPercent(limit) {
@@ -1140,8 +1164,13 @@ HTML = """<!doctype html>
       const currentLimits = limitsMap(currentAccount);
       const fiveHourLimit = currentLimits["5h"] || emptyLimit("5h");
       const weeklyLimit = currentLimits.Weekly || emptyLimit("Weekly");
-      const availableCount = data.accounts.filter(account => quotaState(account).available).length;
-      const unavailableCount = Math.max(0, data.accounts.length - availableCount);
+      const quotaStates = data.accounts.map(account => quotaState(account));
+      const availableCount = data.accounts.filter(account => (
+        authState(account).available && quotaState(account).quotaAvailable === true
+      )).length;
+      const quotaExhaustedCount = quotaStates.filter(state => state.quotaAvailable === false).length;
+      const quotaUnknownCount = quotaStates.filter(state => state.quotaAvailable === null).length;
+      const authIssueCount = data.accounts.filter(account => !authState(account).available).length;
       const cards = [
         summaryCard("当前账号", data.current.alias),
         summaryCard("邮箱", displayEmail(data.current.email)),
@@ -1158,8 +1187,12 @@ HTML = """<!doctype html>
         summaryCard("Weekly重置", weeklyLimit.reset_at || "N/A"),
         summaryCard("账号数", String(data.accounts.length)),
         summaryCard("可用账号", String(availableCount)),
-        summaryCard("不可用", String(unavailableCount))
+        summaryCard("额度耗尽", String(quotaExhaustedCount)),
+        summaryCard("认证异常", String(authIssueCount))
       );
+      if (quotaUnknownCount > 0) {
+        cards.push(summaryCard("额度未知", String(quotaUnknownCount)));
+      }
       summaryEl.innerHTML = cards.join("");
     }
 
@@ -1177,7 +1210,11 @@ HTML = """<!doctype html>
       }
       gridEl.innerHTML = data.accounts.map(account => {
         const state = quotaState(account);
+        const auth = authState(account);
         const aliasArg = encodeAlias(account.alias);
+        const authPill = auth.available
+          ? ""
+          : `<span class="pill ${auth.className}" title="${escapeAttr(auth.issue || "认证状态异常")}">${auth.label}</span>`;
         return `
           <article class="card glass ${account.is_current ? "current" : ""}">
             <div class="card-head">
@@ -1187,6 +1224,7 @@ HTML = """<!doctype html>
                 <div class="pills">
                   <span class="pill ${account.refresh_due ? "warn" : "codex"}">${account.refresh_due ? "临期" : "Codex"}</span>
                   <span class="pill ${state.className}">${state.label}</span>
+                  ${authPill}
                   <span class="pill ${account.is_member ? "member" : ""}">${account.is_member ? "会员" : "普通"}</span>
                 </div>
                 <div class="email">${displayEmail(account.email)}</div>
