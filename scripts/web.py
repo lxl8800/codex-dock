@@ -254,9 +254,9 @@ HTML = """<!doctype html>
     }
     .summary {
       display: grid;
-      grid-template-columns: repeat(8, minmax(0, 1fr));
-      gap: 18px;
-      overflow: hidden;
+      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+      gap: 14px 18px;
+      overflow: visible;
       border-radius: 0;
       border: 0;
       align-items: center;
@@ -320,7 +320,7 @@ HTML = """<!doctype html>
       padding: 12px;
       position: relative;
       overflow: hidden;
-      min-height: 210px;
+      min-height: 248px;
     }
     .card::after {
       content: "";
@@ -407,6 +407,10 @@ HTML = """<!doctype html>
       background: rgba(243,155,140,.16);
       color: #ffd4cb;
     }
+    .pill.wait {
+      background: rgba(255,199,95,.16);
+      color: #ffe2a4;
+    }
     .email {
       font-size: 14px;
       font-weight: 800;
@@ -431,6 +435,14 @@ HTML = """<!doctype html>
     }
     .usage {
       margin-bottom: 10px;
+    }
+    .usage-stack {
+      display: grid;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .usage-stack .usage {
+      margin-bottom: 0;
     }
     .usage-head {
       display: flex;
@@ -709,7 +721,6 @@ HTML = """<!doctype html>
     }
     @media (max-width: 1280px) {
       .tabs { grid-template-columns: 1fr; }
-      .summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
       .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .guide-grid { grid-template-columns: 1fr; }
     }
@@ -718,7 +729,6 @@ HTML = """<!doctype html>
       .hero { flex-direction: column; align-items: stretch; }
       .actions { justify-content: flex-start; }
       .tabs { grid-template-columns: 1fr; }
-      .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .guide-grid { grid-template-columns: 1fr; }
     }
@@ -1030,16 +1040,84 @@ HTML = """<!doctype html>
 
     function limitsMap(account) {
       const lookup = {};
-      (account.usage_limits || []).forEach(limit => {
-        lookup[limit.label] = limit;
+      ((account && account.usage_limits) || []).forEach(limit => {
+        const label = normalizedLimitLabel(limit.label);
+        if (label) lookup[label] = limit;
       });
       return lookup;
     }
 
-    function primaryLimit(account) {
+    function normalizedLimitLabel(label) {
+      const normalized = String(label || "").trim().toLowerCase();
+      if (normalized === "5h") return "5h";
+      if (normalized === "weekly") return "Weekly";
+      return label ? String(label).trim() : "";
+    }
+
+    function emptyLimit(label) {
+      return { label, left_percent: 0, reset_at: "N/A", missing: true };
+    }
+
+    function limitPercent(limit) {
+      return Math.max(0, Math.min(100, Number(limit && limit.left_percent || 0)));
+    }
+
+    function limitTitle(label) {
+      return label === "5h" ? "5小时限额" : label === "Weekly" ? "周限额" : label;
+    }
+
+    function supportsFiveHourLimit(account) {
+      return Boolean(account && (account.is_member || planSupportsFiveHour(account.plan)));
+    }
+
+    function displayedLimits(account) {
       const lookup = limitsMap(account);
-      const preferred = account.is_member || planSupportsFiveHour(account.plan) ? "5h" : "Weekly";
-      return lookup[preferred] || Object.values(lookup)[0] || null;
+      const labels = supportsFiveHourLimit(account) ? ["5h", "Weekly"] : ["Weekly"];
+      return labels.map(label => lookup[label] || emptyLimit(label));
+    }
+
+    function quotaState(account) {
+      const lookup = limitsMap(account);
+      const weekly = lookup.Weekly;
+      if (weekly && limitPercent(weekly) <= 0) {
+        return { label: "周额度耗尽", className: "warn", quotaAvailable: false };
+      }
+      if (!supportsFiveHourLimit(account)) {
+        return weekly
+          ? { label: "有额度", className: "member", quotaAvailable: true }
+          : { label: "额度未知", className: "", quotaAvailable: null };
+      }
+      const fiveHour = lookup["5h"];
+      if (fiveHour && limitPercent(fiveHour) <= 0) {
+        return { label: "待5h重置", className: "wait", quotaAvailable: false };
+      }
+      if (weekly || fiveHour) {
+        return { label: "有额度", className: "member", quotaAvailable: true };
+      }
+      return { label: "额度未知", className: "", quotaAvailable: null };
+    }
+
+    function authState(account) {
+      const issue = String((account && account.auth_issue) || (account && account.token_keepalive_error) || "");
+      const available = Boolean(account) && account.auth_available !== false && !issue;
+      return {
+        available,
+        label: available ? "认证正常" : "认证异常",
+        className: available ? "member" : "warn",
+        issue
+      };
+    }
+
+    function escapeAttr(value) {
+      return String(value || "")
+        .replace(/&/g, "&amp;")
+        .replace(/"/g, "&quot;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
+    }
+
+    function formatLimitPercent(limit) {
+      return limit && !limit.missing ? `${limitPercent(limit).toFixed(0)}%` : "N/A";
     }
 
     function summaryCard(label, value) {
@@ -1051,51 +1129,71 @@ HTML = """<!doctype html>
       `;
     }
 
-    function usageBlock(limit, plan) {
+    function usageBlock(limit) {
       if (!limit) {
-        const fallbackTitle = planSupportsFiveHour(plan) ? "5小时限额" : "周限额";
         return `
           <div class="usage">
             <div class="usage-head">
-              <div class="usage-title">${fallbackTitle}</div>
+              <div class="usage-title">限额</div>
               <div class="usage-side"><span>N/A</span><strong>0%</strong></div>
             </div>
             <div class="track"><div class="fill" style="width:0%"></div></div>
           </div>
         `;
       }
-      const title = limit.label === "5h" ? "5小时限额" : limit.label === "Weekly" ? "周限额" : limit.label;
-      const percent = Math.max(0, Math.min(100, Number(limit.left_percent || 0)));
+      const title = limitTitle(limit.label);
+      const percent = limitPercent(limit);
       return `
         <div class="usage">
           <div class="usage-head">
             <div class="usage-title">${title}</div>
-            <div class="usage-side"><span>${limit.reset_at || "N/A"}</span><strong>${percent.toFixed(0)}%</strong></div>
+            <div class="usage-side"><span>${limit.reset_at || "N/A"}</span><strong>${limit.missing ? "N/A" : percent.toFixed(0) + "%"}</strong></div>
           </div>
           <div class="track"><div class="fill" style="width:${percent}%"></div></div>
         </div>
       `;
     }
 
+    function usageBlocks(account) {
+      return `<div class="usage-stack">${displayedLimits(account).map(usageBlock).join("")}</div>`;
+    }
+
     function renderSummary(data) {
       const current = data.accounts.find(account => account.is_current) || {};
-      const limit = primaryLimit({ ...current, plan: data.current.plan || current.plan });
-      const quotaLabel = planSupportsFiveHour(data.current.plan || current.plan) ? "5 小时额度" : "周限额";
-      const quotaCount = data.accounts.filter(account => {
-        const accountLimit = primaryLimit(account);
-        return accountLimit && Number(accountLimit.left_percent || 0) > 0;
-      }).length;
-      const noQuotaCount = Math.max(0, data.accounts.length - quotaCount);
-      summaryEl.innerHTML = [
+      const currentAccount = { ...current, plan: data.current.plan || current.plan };
+      const currentLimits = limitsMap(currentAccount);
+      const fiveHourLimit = currentLimits["5h"] || emptyLimit("5h");
+      const weeklyLimit = currentLimits.Weekly || emptyLimit("Weekly");
+      const quotaStates = data.accounts.map(account => quotaState(account));
+      const availableCount = data.accounts.filter(account => (
+        authState(account).available && quotaState(account).quotaAvailable === true
+      )).length;
+      const quotaExhaustedCount = quotaStates.filter(state => state.quotaAvailable === false).length;
+      const quotaUnknownCount = quotaStates.filter(state => state.quotaAvailable === null).length;
+      const authIssueCount = data.accounts.filter(account => !authState(account).available).length;
+      const cards = [
         summaryCard("当前账号", data.current.alias),
         summaryCard("邮箱", displayEmail(data.current.email)),
-        summaryCard("套餐", String(data.current.plan || "N/A").toUpperCase()),
-        summaryCard(quotaLabel, limit ? `${Number(limit.left_percent || 0).toFixed(0)}%` : "N/A"),
-        summaryCard("重置时间", limit ? limit.reset_at : "N/A"),
+        summaryCard("套餐", String(data.current.plan || "N/A").toUpperCase())
+      ];
+      if (supportsFiveHourLimit(currentAccount)) {
+        cards.push(
+          summaryCard("5h额度", formatLimitPercent(fiveHourLimit)),
+          summaryCard("5h重置", fiveHourLimit.reset_at || "N/A")
+        );
+      }
+      cards.push(
+        summaryCard("Weekly额度", formatLimitPercent(weeklyLimit)),
+        summaryCard("Weekly重置", weeklyLimit.reset_at || "N/A"),
         summaryCard("账号数", String(data.accounts.length)),
-        summaryCard("有额度", String(quotaCount)),
-        summaryCard("无额度", String(noQuotaCount))
-      ].join("");
+        summaryCard("可用账号", String(availableCount)),
+        summaryCard("额度耗尽", String(quotaExhaustedCount)),
+        summaryCard("认证异常", String(authIssueCount))
+      );
+      if (quotaUnknownCount > 0) {
+        cards.push(summaryCard("额度未知", String(quotaUnknownCount)));
+      }
+      summaryEl.innerHTML = cards.join("");
     }
 
     function updateDetachedAlert(data) {
@@ -1111,8 +1209,12 @@ HTML = """<!doctype html>
         return;
       }
       gridEl.innerHTML = data.accounts.map(account => {
-        const limit = primaryLimit(account);
+        const state = quotaState(account);
+        const auth = authState(account);
         const aliasArg = encodeAlias(account.alias);
+        const authPill = auth.available
+          ? ""
+          : `<span class="pill ${auth.className}" title="${escapeAttr(auth.issue || "认证状态异常")}">${auth.label}</span>`;
         return `
           <article class="card glass ${account.is_current ? "current" : ""}">
             <div class="card-head">
@@ -1121,7 +1223,8 @@ HTML = """<!doctype html>
               <div class="meta">
                 <div class="pills">
                   <span class="pill ${account.refresh_due ? "warn" : "codex"}">${account.refresh_due ? "临期" : "Codex"}</span>
-                  <span class="pill ${limit && Number(limit.left_percent || 0) > 0 ? "member" : ""}">${limit && Number(limit.left_percent || 0) > 0 ? "有额度" : "无额度"}</span>
+                  <span class="pill ${state.className}">${state.label}</span>
+                  ${authPill}
                   <span class="pill ${account.is_member ? "member" : ""}">${account.is_member ? "会员" : "普通"}</span>
                 </div>
                 <div class="email">${displayEmail(account.email)}</div>
@@ -1132,7 +1235,7 @@ HTML = """<!doctype html>
               <span>${account.is_member ? `会员到期 ${account.subscription_until_text || "N/A"}` : `套餐 ${String(account.plan || "N/A").replace(/^./, c => c.toUpperCase())}`}</span>
             </div>
             <div class="divider"></div>
-            ${usageBlock(limit, account.plan)}
+            ${usageBlocks(account)}
             <div class="tools">
               <button class="mini-btn green" onclick='switchAccount(${aliasArg})'>切换</button>
               <button class="mini-btn" onclick='refreshAccount(${aliasArg})'>刷新</button>

@@ -561,8 +561,10 @@ class CodexService:
         now = now or datetime.now()
         try:
             auth_payload, auth_path = self._load_account_auth(alias)
-        except Exception:
+        except Exception as exc:
             return {
+                "auth_available": False,
+                "auth_issue": f"认证归档不可用：{exc}",
                 "last_token_refresh_at": None,
                 "next_token_refresh_at": None,
                 "token_refresh_due": False,
@@ -571,6 +573,8 @@ class CodexService:
         next_refresh_dt, error_message = self._ensure_token_keepalive_schedule(alias, auth_payload, auth_path, now=now)
         last_refresh_dt = self._parse_datetime_value(auth_payload.get("last_refresh"))
         return {
+            "auth_available": not bool(error_message),
+            "auth_issue": error_message,
             "last_token_refresh_at": last_refresh_dt.isoformat() if last_refresh_dt else None,
             "next_token_refresh_at": next_refresh_dt.isoformat() if next_refresh_dt else None,
             "token_refresh_due": next_refresh_dt <= now,
