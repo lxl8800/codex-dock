@@ -467,20 +467,26 @@ HTML = """<!doctype html>
     }
     .tools {
       display: flex;
-      gap: 6px;
-      flex-wrap: wrap;
+      gap: 5px;
+      flex-wrap: nowrap;
+      min-width: 0;
     }
     .mini-btn {
       border: 1px solid rgba(255,255,255,.10);
       background: rgba(255,255,255,.06);
       color: var(--text);
       border-radius: 12px;
-      padding: 8px 10px;
+      flex: 1 1 0;
+      min-width: 0;
+      padding: 8px 6px;
       font-size: 11px;
       font-weight: 800;
+      line-height: 1;
       cursor: pointer;
+      white-space: nowrap;
     }
     .mini-btn.green { background: rgba(53,211,154,.14); color: #93f1cb; }
+    .mini-btn.blue { background: rgba(111,132,255,.16); color: #dce2ff; }
     .mini-btn.red { background: rgba(243,155,140,.14); color: #ffc7bd; }
     .guide-view {
       min-height: 0;
@@ -1137,6 +1143,7 @@ HTML = """<!doctype html>
               <button class="mini-btn green" onclick='switchAccount(${aliasArg})'>切换</button>
               <button class="mini-btn" onclick='refreshAccount(${aliasArg})'>刷新</button>
               <button class="mini-btn" onclick='refreshAccountPrecise(${aliasArg})'>精准</button>
+              <button class="mini-btn blue" onclick='refreshAccountToken(${aliasArg})'>Token</button>
               <button class="mini-btn red" onclick='removeAccount(${aliasArg})'>删除</button>
             </div>
           </article>
@@ -1264,6 +1271,17 @@ HTML = """<!doctype html>
 
     function refreshAccountPrecise(alias) {
       return refreshSingleAccount(alias, true);
+    }
+
+    async function refreshAccountToken(alias) {
+      try {
+        setStatus(`Refreshing token: ${alias}`);
+        await request("/api/refresh-token", "POST", { alias });
+        await loadState("Token refreshed", false);
+        setStatus(`Token refreshed: ${alias}`);
+      } catch (error) {
+        setStatus(`Token refresh failed: ${alias} / ${error.message}`);
+      }
     }
 
     function refreshAllAccounts(precise = false) {
@@ -1464,8 +1482,14 @@ class DashboardState:
         return limits
 
     def snapshot(self):
-        snapshot = self.service.build_dashboard_snapshot(include_live_current_snapshot=True)
-        for item in snapshot.get("accounts", []):
+        snapshot = self.service.build_dashboard_snapshot(include_live_current_snapshot=False)
+        accounts = snapshot.get("accounts")
+        if not isinstance(accounts, list):
+            snapshot["accounts"] = []
+            accounts = snapshot["accounts"]
+        for item in accounts:
+            if not isinstance(item, dict):
+                continue
             item["usage_limits"] = item.get("usage_limits") or self._fallback_limits(item)
         return snapshot
 
@@ -1518,6 +1542,8 @@ def _make_handler(app, server_ref):
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except Exception:
                 payload = {}
+            if not isinstance(payload, dict):
+                payload = {}
 
             try:
                 if self.path == "/api/refresh":
@@ -1535,6 +1561,13 @@ def _make_handler(app, server_ref):
                     snapshot = app.service.refresh_precise_usage_for_alias(alias)
                     _json_response(self, HTTPStatus.OK, {"ok": True, "snapshot": snapshot})
                     return
+                if self.path == "/api/refresh-token":
+                    alias = str(payload.get("alias") or "").strip()
+                    if not alias:
+                        raise ValueError("Alias is required")
+                    result = app.service.refresh_access_token_for_alias(alias)
+                    _json_response(self, HTTPStatus.OK, result)
+                    return
                 if self.path == "/api/refresh-all-precise":
                     result = app.service.refresh_all_accounts_precise(throttle_seconds=1.0)
                     _json_response(self, HTTPStatus.OK, result)
@@ -1546,7 +1579,9 @@ def _make_handler(app, server_ref):
                     return
                 if self.path == "/api/add":
                     alias = str(payload.get("alias") or "").strip()
-                    if not alias or not app.service.add_account(alias):
+                    if not alias:
+                        raise ValueError("Alias is required")
+                    if not app.service.add_account(alias):
                         raise ValueError("Add account failed")
                     _json_response(self, HTTPStatus.OK, {"ok": True})
                     return

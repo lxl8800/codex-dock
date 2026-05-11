@@ -137,17 +137,35 @@ class CodexService:
         return any(str(limit.get("label") or "").strip().lower() == "5h" for limit in limits or [])
 
     @classmethod
-    def _get_current_auth_identity(cls, auth_payload: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
+    def _get_auth_identity_info(cls, auth_payload: dict[str, Any] | None) -> dict[str, str | None]:
+        info: dict[str, str | None] = {
+            "email": None,
+            "plan": None,
+            "account_id": None,
+            "user_id": None,
+        }
         if not auth_payload:
-            return None, None, None
-        tokens = auth_payload.get("tokens", {})
+            return info
+        tokens = cls._as_dict(auth_payload.get("tokens"))
         id_token = tokens.get("id_token", "")
         access_token = tokens.get("access_token", "")
-        email = cls.parse_jwt_email(id_token) if id_token else None
-        plan = cls.parse_jwt_plan(id_token) if id_token else None
-        account_id = tokens.get("account_id") or cls.extract_chatgpt_account_id(access_token)
-        account_id = str(account_id) if account_id else None
-        return (email or None, plan or None, account_id)
+        agent_identity = str(auth_payload.get("agent_identity") or "")
+        identity_token = id_token or agent_identity
+
+        if identity_token:
+            info["email"] = cls.parse_jwt_email(identity_token) or None
+            info["plan"] = cls.parse_jwt_plan(identity_token) or None
+            info["user_id"] = cls.extract_chatgpt_user_id(identity_token) or None
+        if not info["user_id"] and access_token:
+            info["user_id"] = cls.extract_chatgpt_user_id(access_token) or None
+        account_id = tokens.get("account_id") or cls.extract_chatgpt_account_id(identity_token) or cls.extract_chatgpt_account_id(access_token)
+        info["account_id"] = str(account_id) if account_id else None
+        return info
+
+    @classmethod
+    def _get_current_auth_identity(cls, auth_payload: dict[str, Any] | None) -> tuple[str | None, str | None, str | None]:
+        info = cls._get_auth_identity_info(auth_payload)
+        return info["email"], info["plan"], info["account_id"]
 
     def _current_auth_identity(self) -> tuple[str | None, str | None, str | None]:
         if not self.auth_file.exists():
@@ -164,6 +182,10 @@ class CodexService:
             return float(value)
         except Exception:
             return default
+
+    @staticmethod
+    def _as_dict(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
 
     @staticmethod
     def _parse_datetime_value(value: Any) -> datetime | None:
@@ -275,7 +297,7 @@ class CodexService:
         account_id = str(payload.get("account_id") or "").strip() or None
         if not account_id and payload.get("tokens"):
             try:
-                token_payload = payload.get("tokens", {})
+                token_payload = self._as_dict(payload.get("tokens"))
                 account_id = str(token_payload.get("account_id") or "").strip() or None
             except Exception:
                 account_id = None
@@ -385,18 +407,31 @@ class CodexService:
         alias: str | None = None,
         email: str | None = None,
         account_id: str | None = None,
+        user_id: str | None = None,
     ) -> str | None:
         if alias and alias in accounts:
             return alias
+        if user_id:
+            lowered_user_id = user_id.lower()
+            for candidate, data in accounts.items():
+                if not isinstance(data, dict):
+                    continue
+                stored_user_id = str(data.get("user_id") or "").strip().lower()
+                if stored_user_id and stored_user_id == lowered_user_id:
+                    return candidate
         if account_id:
             lowered = account_id.lower()
             for candidate, data in accounts.items():
+                if not isinstance(data, dict):
+                    continue
                 stored = str(data.get("account_id") or "").strip().lower()
                 if stored and stored == lowered:
                     return candidate
         if email:
             lowered_email = email.lower()
             for candidate, data in accounts.items():
+                if not isinstance(data, dict):
+                    continue
                 if str(data.get("email") or "").lower() == lowered_email:
                     return candidate
         return None
@@ -595,7 +630,7 @@ class CodexService:
         with self._bulk_refresh_lock:
             with self._state_lock:
                 auth_payload, auth_path = self._load_account_auth(alias)
-                tokens = auth_payload.get("tokens", {})
+                tokens = self._as_dict(auth_payload.get("tokens"))
                 refresh_token = str(tokens.get("refresh_token") or "").strip()
                 if not refresh_token:
                     raise ValueError("缺少 refresh_token，无法自动刷新登录凭据。")
@@ -663,23 +698,38 @@ class CodexService:
 
     @classmethod
     def parse_jwt_email(cls, token: str) -> str:
-        return str(cls._decode_jwt_payload(token).get("email") or "")
+        payload = cls._decode_jwt_payload(token)
+        profile = cls._as_dict(payload.get("https://api.openai.com/profile"))
+        return str(payload.get("email") or profile.get("email") or "")
 
     @classmethod
     def parse_jwt_plan(cls, token: str) -> str:
-        auth = cls._decode_jwt_payload(token).get("https://api.openai.com/auth", {})
+        auth = cls._as_dict(cls._decode_jwt_payload(token).get("https://api.openai.com/auth"))
         return str(auth.get("chatgpt_plan_type") or "unknown")
 
     @classmethod
     def parse_jwt_subscription_until(cls, token: str) -> str | None:
-        auth = cls._decode_jwt_payload(token).get("https://api.openai.com/auth", {})
+        auth = cls._as_dict(cls._decode_jwt_payload(token).get("https://api.openai.com/auth"))
         value = auth.get("chatgpt_subscription_active_until")
         return str(value) if value else None
 
     @classmethod
     def extract_chatgpt_account_id(cls, token: str) -> str:
-        auth = cls._decode_jwt_payload(token).get("https://api.openai.com/auth", {})
-        return str(auth.get("chatgpt_account_id") or "")
+        payload = cls._decode_jwt_payload(token)
+        auth = cls._as_dict(payload.get("https://api.openai.com/auth"))
+        return str(auth.get("chatgpt_account_id") or payload.get("account_id") or "")
+
+    @classmethod
+    def extract_chatgpt_user_id(cls, token: str) -> str:
+        payload = cls._decode_jwt_payload(token)
+        auth = cls._as_dict(payload.get("https://api.openai.com/auth"))
+        return str(
+            auth.get("chatgpt_user_id")
+            or auth.get("user_id")
+            or payload.get("chatgpt_user_id")
+            or payload.get("user_id")
+            or ""
+        )
 
     @classmethod
     def is_token_expired(cls, access_token: str) -> bool:
@@ -696,10 +746,17 @@ class CodexService:
         method: str = "GET",
         headers: dict[str, str] | None = None,
         data: dict[str, Any] | None = None,
+        json_data: dict[str, Any] | None = None,
         timeout: int = 20,
     ) -> tuple[dict[str, Any], str]:
-        encoded = parse.urlencode(data).encode("utf-8") if data is not None else None
+        encoded = None
+        if json_data is not None:
+            encoded = json.dumps(json_data).encode("utf-8")
+        elif data is not None:
+            encoded = parse.urlencode(data).encode("utf-8")
         req = request.Request(url, method=method, data=encoded)
+        if json_data is not None:
+            req.add_header("Content-Type", "application/json")
         for key, value in (headers or {}).items():
             req.add_header(key, value)
         with request.urlopen(req, timeout=timeout) as resp:
@@ -713,18 +770,30 @@ class CodexService:
             "client_id": self.AUTH_CLIENT_ID,
         }
         try:
-            data, _ = self._request_json(self.AUTH_TOKEN_URL, method="POST", data=payload)
+            data, _ = self._request_json(self.AUTH_TOKEN_URL, method="POST", json_data=payload)
         except error.HTTPError as exc:
             body = exc.read().decode("utf-8", "ignore")
             detail = ""
+            code = ""
             try:
                 error_payload = json.loads(body)
-                detail = str((error_payload.get("error") or {}).get("message") or "").strip()
+                raw_error = error_payload.get("error")
+                if isinstance(raw_error, dict):
+                    detail = str(raw_error.get("message") or "").strip()
+                    code = str(raw_error.get("code") or "").strip()
+                elif isinstance(raw_error, str):
+                    code = raw_error.strip()
+                code = code or str(error_payload.get("code") or "").strip()
             except Exception:
                 detail = body[:200].strip()
             detail_lower = detail.lower()
-            if "refresh token has already been used" in detail_lower or "signing in again" in detail_lower:
+            code_lower = code.lower()
+            if code_lower == "refresh_token_reused" or "refresh token has already been used" in detail_lower or "signing in again" in detail_lower:
                 detail = "登录凭据已过期或已被轮换，请切换到该账号重新登录后再保存。"
+            elif code_lower == "refresh_token_expired":
+                detail = "refresh token expired; please sign in again and save this account."
+            elif code_lower == "refresh_token_invalidated":
+                detail = "refresh token was revoked; please sign in again and save this account."
             elif exc.code == 401:
                 detail = "登录凭据已失效，请切换到该账号重新登录后再保存。"
             suffix = f"：{detail}" if detail else ""
@@ -792,7 +861,7 @@ class CodexService:
 
     @staticmethod
     def _normalize_account_snapshot_fields(payload: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(payload)
+        normalized = dict(payload) if isinstance(payload, dict) else {}
         if not normalized.get("usage_limits") and isinstance(normalized.get("limits"), list):
             normalized["usage_limits"] = normalized.get("limits")
         if not normalized.get("usage_left") and normalized.get("summary_left"):
@@ -851,6 +920,11 @@ class CodexService:
             email = self.parse_jwt_email(tokens.get("id_token", ""))
             subscription_until = self.parse_jwt_subscription_until(tokens.get("id_token", ""))
             account_id = str(tokens.get("account_id") or self.extract_chatgpt_account_id(tokens.get("access_token", "")) or "").strip() or None
+            user_id = str(
+                self.extract_chatgpt_user_id(tokens.get("id_token", ""))
+                or self.extract_chatgpt_user_id(tokens.get("access_token", ""))
+                or ""
+            ).strip() or None
             payload = accounts[alias]
             changed = False
             if plan and payload.get("plan") != plan:
@@ -865,6 +939,9 @@ class CodexService:
             if account_id and payload.get("account_id") != account_id:
                 payload["account_id"] = account_id
                 changed = True
+            if user_id and payload.get("user_id") != user_id:
+                payload["user_id"] = user_id
+                changed = True
             if changed:
                 self.save_accounts(accounts)
 
@@ -875,8 +952,8 @@ class CodexService:
             current = json.loads(self.auth_file.read_text(encoding="utf-8"))
         except Exception:
             return
-        current_tokens = current.get("tokens", {})
-        alias_tokens = auth_payload.get("tokens", {})
+        current_tokens = self._as_dict(current.get("tokens"))
+        alias_tokens = self._as_dict(auth_payload.get("tokens"))
         current_account_id = current_tokens.get("account_id") or self.extract_chatgpt_account_id(
             current_tokens.get("access_token", "")
         )
@@ -885,6 +962,45 @@ class CodexService:
         )
         if current_account_id and alias_account_id and current_account_id == alias_account_id:
             self._save_auth_payload(self.auth_file, auth_payload)
+
+    def _sync_current_auth_to_archive(self) -> bool:
+        if not self.auth_file.exists():
+            return False
+        try:
+            auth_payload = json.loads(self.auth_file.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        info = self._get_auth_identity_info(auth_payload)
+        if not any(info.get(key) for key in ("email", "account_id", "user_id")):
+            return False
+
+        with self._state_lock:
+            accounts = self._load_accounts_locked()
+            alias = self._resolve_account_alias(
+                accounts,
+                email=info.get("email"),
+                account_id=info.get("account_id"),
+                user_id=info.get("user_id"),
+            )
+            if not alias:
+                return False
+            target_path = self._account_auth_path(alias)
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(self.auth_file, target_path)
+
+            payload = accounts.get(alias, {})
+            changed = False
+            for key in ("email", "plan", "account_id", "user_id"):
+                value = info.get(key)
+                if value and payload.get(key) != value:
+                    payload[key] = value
+                    changed = True
+            if payload:
+                payload["alias"] = alias
+            if changed:
+                accounts[alias] = payload
+                self.save_accounts(accounts)
+            return True
 
     def _persist_refreshed_tokens(
         self,
@@ -977,7 +1093,7 @@ class CodexService:
         with self._bulk_refresh_lock:
             with self._state_lock:
                 auth_payload, auth_path = self._load_account_auth(alias)
-                tokens = auth_payload.get("tokens", {})
+                tokens = self._as_dict(auth_payload.get("tokens"))
                 access_token = tokens.get("access_token") or ""
                 refresh_token = tokens.get("refresh_token")
                 account_id = tokens.get("account_id") or self.extract_chatgpt_account_id(access_token)
@@ -1061,13 +1177,13 @@ class CodexService:
                 return False
             accounts = self._load_accounts_locked()
             auth_payload = json.loads(self.auth_file.read_text(encoding="utf-8"))
-            id_token = auth_payload.get("tokens", {}).get("id_token", "")
-            email = self.parse_jwt_email(id_token)
-            plan = self.parse_jwt_plan(id_token)
+            info = self._get_auth_identity_info(auth_payload)
+            id_token = self._as_dict(auth_payload.get("tokens")).get("id_token", "") or str(auth_payload.get("agent_identity") or "")
+            email = info.get("email")
+            plan = info.get("plan")
             subscription_until = self.parse_jwt_subscription_until(id_token)
-            account_id = auth_payload.get("tokens", {}).get("account_id") or self.extract_chatgpt_account_id(
-                auth_payload.get("tokens", {}).get("access_token", "")
-            )
+            account_id = info.get("account_id")
+            user_id = info.get("user_id")
             if not email:
                 print("Unable to read email from auth.json.")
                 return False
@@ -1084,6 +1200,7 @@ class CodexService:
                 "plan": plan,
                 "subscription_until": subscription_until,
                 "account_id": str(account_id) if account_id else None,
+                "user_id": str(user_id) if user_id else None,
             }
             snapshot = self.get_usage_snapshot()
             if snapshot:
@@ -1500,6 +1617,7 @@ class CodexService:
         )
 
     def switch_account(self, alias_or_fragment: str) -> bool:
+        self._sync_current_auth_to_archive()
         self.sync_current_account_usage_snapshot()
         accounts = self.get_accounts()
         needle = alias_or_fragment.lower()
